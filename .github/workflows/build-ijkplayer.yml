@@ -11,8 +11,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake
-          # 可选：安装内核头文件（如果不禁用 perf，就需要这个）
-          # sudo apt-get install -y linux-headers-$(uname -r)
+          # 关键：安装内核头文件，解决 perf_event.h 缺失
+          sudo apt-get install -y linux-headers-$(uname -r)
 
       - name: Setup NDK r14b
         run: |
@@ -40,14 +40,19 @@ jobs:
           ./init-android-openssl.sh
           ./init-android.sh
 
-      - name: Enable OpenSSL and disable linux-perf
+      - name: Enable OpenSSL and disable linux-perf in config
         run: |
           cd ijkplayer/config
           rm -f module.sh
           ln -s module-default.sh module.sh
-          # 关键：同时添加 --enable-openssl 和 --disable-linux-perf
           echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl --disable-linux-perf"' >> module.sh
-          cat module.sh  # 可选：检查内容
+          cat module.sh
+
+      # 额外保险：直接补丁 FFmpeg timer.h，移除 perf_event.h 包含（防止任何残留）
+      - name: Patch FFmpeg timer.h
+        run: |
+          cd ijkplayer/extra/ffmpeg
+          sed -i 's|#include <linux/perf_event.h>|// &|' libavutil/timer.h || true
 
       - name: Compile OpenSSL
         run: |
@@ -66,7 +71,7 @@ jobs:
           cd ijkplayer/android
           ./compile-ijk.sh all
 
-      - name: Collect .so files
+      - name: Collect .so files (armv7 and arm64)
         run: |
           mkdir -p output/armeabi-v7a output/arm64-v8a
           cp ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/
