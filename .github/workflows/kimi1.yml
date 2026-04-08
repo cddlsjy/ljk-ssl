@@ -1,0 +1,114 @@
+name: Build IJKPlayer with OpenSSL (armv7 + arm64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake
+          sudo apt-get install -y linux-headers-generic
+
+      - name: Setup NDK r14b
+        run: |
+          cd $HOME
+          wget -q https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip
+          unzip -q android-ndk-r14b-linux-x86_64.zip
+          echo "ANDROID_NDK=$HOME/android-ndk-r14b" >> $GITHUB_ENV
+          echo "$HOME/android-ndk-r14b" >> $GITHUB_PATH
+
+      - name: Override system NDK
+        run: |
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          echo "NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/27.3.13750724 || true
+
+      - name: Clone IJKPlayer
+        run: |
+          git clone https://github.com/Bilibili/ijkplayer.git ijkplayer
+          cd ijkplayer
+          git checkout k0.8.8
+
+      - name: Initialize OpenSSL and FFmpeg
+        run: |
+          cd ijkplayer
+          ./init-android-openssl.sh
+          ./init-android.sh
+
+      - name: Enable OpenSSL and disable linux-perf
+        run: |
+          cd ijkplayer/config
+          rm -f module.sh
+          ln -s module-default.sh module.sh
+          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl --disable-linux-perf"' >> module.sh
+          cat module.sh
+
+      - name: Patch FFmpeg to remove perf_event.h dependency
+        run: |
+          cd ijkplayer/extra/ffmpeg
+          find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's|#include <linux/perf_event.h>|/* & */|g' {} \;
+          sed -i 's|#include <linux/perf_event.h>|/* & */|g' libavutil/timer.h || true
+
+      - name: Compile OpenSSL
+        run: |
+          cd ijkplayer/android/contrib
+          ./compile-openssl.sh clean
+          ./compile-openssl.sh all
+
+      - name: Compile FFmpeg
+        run: |
+          cd ijkplayer/android/contrib
+          ./compile-ffmpeg.sh clean
+          ./compile-ffmpeg.sh all
+
+      - name: Compile IJKPlayer
+        run: |
+          cd ijkplayer/android
+          ./compile-ijk.sh clean  # 先清理
+          ./compile-ijk.sh all
+          # 🔍 调试：检查实际生成的路径
+          echo "=== Checking generated libs ==="
+          find . -name "*.so" -type f 2>/dev/null || true
+
+      - name: Collect .so files
+        run: |
+          mkdir -p output/armeabi-v7a output/arm64-v8a
+          
+          # ✅ 修正后的路径（添加 android/ 目录）
+          ARM7_SRC="ijkplayer/android/ijkplayer-armv7a/src/main/libs/armeabi-v7a"
+          ARM64_SRC="ijkplayer/android/ijkplayer-arm64/src/main/libs/arm64-v8a"
+          
+          # 检查目录是否存在
+          ls -la $ARM7_SRC || echo "ARM7 path not found!"
+          ls -la $ARM64_SRC || echo "ARM64 path not found!"
+          
+          # 复制所有 so 文件（包括依赖库）
+          if [ -d "$ARM7_SRC" ]; then
+            cp $ARM7_SRC/*.so output/armeabi-v7a/ 2>/dev/null || true
+          fi
+          
+          if [ -d "$ARM64_SRC" ]; then
+            cp $ARM64_SRC/*.so output/arm64-v8a/ 2>/dev/null || true
+          fi
+          
+          # 复制 contrib 编译的 OpenSSL 库（如果需要）
+          cp ijkplayer/android/contrib/build/armv7a/output/lib/*.so output/armeabi-v7a/ 2>/dev/null || true
+          cp ijkplayer/android/contrib/build/arm64-v8a/output/lib/*.so output/arm64-v8a/ 2>/dev/null || true
+          
+          echo "=== Final output ==="
+          ls -la output/armeabi-v7a/ || true
+          ls -la output/arm64-v8a/ || true
+          
+          # 验证 OpenSSL 符号
+          nm -D output/armeabi-v7a/libijkffmpeg.so 2>/dev/null | grep -i "ssl\|crypto" | head -5 || echo "No SSL symbols found"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ijkplayer-openssl-libs
+          path: output/
+          if-no-files-found: warn  # 如果没有文件会警告而不是报错
