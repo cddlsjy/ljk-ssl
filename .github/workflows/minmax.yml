@@ -1,0 +1,154 @@
+name: Build ijkplayer with OpenSSL (armv7a + arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_config:
+        description: 'Build configuration'
+        required: true
+        default: 'module-lite.sh'
+        type: choice
+        options:
+          - module-lite.sh
+          - module-default.sh
+          - module-lite-hevc.sh
+
+env:
+  NDK_VERSION: r21e
+  ANDROID_API: 21
+  PLATFORM_PREFIX: /opt/android
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout ijkplayer repository
+        uses: actions/checkout@v4
+        with:
+          repository: Bilibili/ijkplayer
+          ref: k0.8.8
+          path: ijkplayer
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git yasm curl wget unzip build-essential \
+            python3 cmake autoconf automake libtool \
+            pkg-config texinfo bc \
+            --no-install-recommends
+
+      - name: Download Android NDK
+        run: |
+          mkdir -p $PLATFORM_PREFIX
+          cd $PLATFORM_PREFIX
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          rm android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          echo "NDK_ROOT=$PLATFORM_PREFIX/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+
+      - name: Configure build options
+        run: |
+          cd ijkplayer/config
+
+          # Backup and use selected config
+          cp ${{ github.event.inputs.build_config }} module.sh
+
+          # Fix FFmpeg 4.x removed options
+          sed -i 's/--disable-ffserver/# --disable-ffserver/' module.sh 2>/dev/null || true
+          sed -i 's/--disable-vda/# --disable-vda/' module.sh 2>/dev/null || true
+
+          # Add OpenSSL support and fixes
+          cat >> module.sh << 'EOF'
+
+          # ============================================
+          # HTTPS Support Configuration
+          # ============================================
+
+          # Enable OpenSSL for HTTPS (REQUIRED)
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl"
+
+          # Fix compatibility issues
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-linux-perf"
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-iconv"
+
+          # Optimize size
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-programs"
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-doc"
+          EOF
+
+          echo "=== Final module.sh ==="
+          tail -20 module.sh
+
+      - name: Initialize Android libraries
+        run: |
+          cd ijkplayer
+          bash ./init-android.sh
+
+      - name: Initialize OpenSSL
+        run: |
+          cd ijkplayer
+          bash ./init-android-openssl.sh
+
+      - name: Build OpenSSL for armv7a
+        run: |
+          cd ijkplayer/android/contrib
+          export ANDROID_NDK=$PLATFORM_PREFIX/android-ndk-${{ env.NDK_VERSION }}
+          ./compile-openssl.sh clean
+          ./compile-openssl.sh armv7a
+
+      - name: Build OpenSSL for arm64
+        run: |
+          cd ijkplayer/android/contrib
+          export ANDROID_NDK=$PLATFORM_PREFIX/android-ndk-${{ env.NDK_VERSION }}
+          ./compile-openssl.sh arm64
+
+      - name: Build FFmpeg for armv7a
+        run: |
+          cd ijkplayer/android/contrib
+          export ANDROID_NDK=$PLATFORM_PREFIX/android-ndk-${{ env.NDK_VERSION }}
+          ./compile-ffmpeg.sh clean
+          ./compile-ffmpeg.sh armv7a
+
+      - name: Build FFmpeg for arm64
+        run: |
+          cd ijkplayer/android/contrib
+          export ANDROID_NDK=$PLATFORM_PREFIX/android-ndk-${{ env.NDK_VERSION }}
+          ./compile-ffmpeg.sh arm64
+
+      - name: Build ijkplayer armv7a
+        run: |
+          cd ijkplayer/android
+          export ANDROID_NDK=$PLATFORM_PREFIX/android-ndk-${{ env.NDK_VERSION }}
+          ./compile-ijk.sh armv7a
+
+      - name: Build ijkplayer arm64
+        run: |
+          cd ijkplayer/android
+          export ANDROID_NDK=$PLATFORM_PREFIX/android-ndk-${{ env.NDK_VERSION }}
+          ./compile-ijk.sh arm64
+
+      - name: Collect SO files
+        run: |
+          mkdir -p output/armeabi-v7a output/arm64-v8a
+
+          # Copy armv7a libs
+          cp ijkplayer/android/ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/*.so output/armeabi-v7a/ 2>/dev/null || true
+
+          # Copy arm64 libs
+          cp ijkplayer/android/ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/*.so output/arm64-v8a/ 2>/dev/null || true
+
+          # Show output
+          echo "=== armv7a ==="
+          ls -lh output/armeabi-v7a/ 2>/dev/null || echo "No files"
+          echo "=== arm64-v8a ==="
+          ls -lh output/arm64-v8a/ 2>/dev/null || echo "No files"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ijkplayer-openssl
+          path: output/
+          retention-days: 7
