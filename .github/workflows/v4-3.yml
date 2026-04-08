@@ -1,0 +1,17 @@
+- name: Collect .so files (flexible path)
+  run: |
+    mkdir -p output/armeabi-v7a output/arm64-v8a
+    # 使用 find 自动定位 libijkplayer.so
+    SO_ARM=$(find ijkplayer -path "*/armeabi-v7a/libijkplayer.so" | head -1)
+    SO_ARM64=$(find ijkplayer -path "*/arm64-v8a/libijkplayer.so" | head -1)
+    if [ -f "$SO_ARM" ]; then
+      cp "$SO_ARM" output/armeabi-v7a/
+    else
+      echo "::warning::armeabi-v7a libijkplayer.so not found"
+    fi
+    if [ -f "$SO_ARM64" ]; then
+      cp "$SO_ARM64" output/arm64-v8a/
+    else
+      echo "::warning::arm64-v8a libijkplayer.so not found"
+    fi
+    nm -D output/armeabi-v7a/libijkplayer.so | grep SSL || true
