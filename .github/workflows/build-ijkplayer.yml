@@ -9,7 +9,18 @@ jobs:
     steps:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake
+      - name: Install dependencies
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake
+    sudo apt-get install -y linux-headers-$(uname -r)
 
+- name: Enable OpenSSL in config
+  run: |
+    cd ijkplayer/config
+    rm -f module.sh
+    ln -s module-default.sh module.sh
+    echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl --disable-linux-perf"' >> module.sh
       - name: Setup NDK r14b
         run: |
           cd $HOME
