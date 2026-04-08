@@ -74,15 +74,43 @@ jobs:
           cd ijkplayer/android
           ./compile-ijk.sh all
 
+      # ========== 新增步骤 1：定位生成的 .so 文件 ==========
+      - name: Locate built .so files
+        run: |
+          echo "=== Searching for libijkplayer.so files ==="
+          find ijkplayer -name "libijkplayer.so" -type f 2>/dev/null | tee so_list.txt
+          if [ ! -s so_list.txt ]; then
+            echo "❌ No .so files found! Something went wrong in compilation."
+            exit 1
+          fi
+          echo "✅ Found .so files at above paths."
+
+      # ========== 修改后的收集步骤：自适应拷贝 ==========
       - name: Collect .so files
         run: |
           mkdir -p output/armeabi-v7a output/arm64-v8a
-          cp ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/
-          cp ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so output/arm64-v8a/
-          nm -D output/armeabi-v7a/libijkplayer.so | grep SSL || true
+          # 精确匹配标准路径
+          find ijkplayer -path "*/armeabi-v7a/libijkplayer.so" -exec cp {} output/armeabi-v7a/ \;
+          find ijkplayer -path "*/arm64-v8a/libijkplayer.so" -exec cp {} output/arm64-v8a/ \;
+          
+          # 兜底：如果上面没找到，用 file 命令检测架构类型拷贝
+          if [ -z "$(ls output/armeabi-v7a/)" ] || [ -z "$(ls output/arm64-v8a/)" ]; then
+            echo "Fallback: copying by architecture detection..."
+            for so in $(find ijkplayer -name "libijkplayer.so"); do
+              if file "$so" | grep -q "ARM aarch64"; then
+                cp "$so" output/arm64-v8a/
+              elif file "$so" | grep -q "ARM"; then
+                cp "$so" output/armeabi-v7a/
+              fi
+            done
+          fi
+          
+          echo "=== Collected .so files ==="
+          ls -l output/*/ || true
+          nm -D output/armeabi-v7a/libijkplayer.so 2>/dev/null | grep SSL || echo "No SSL symbols in armv7 (check arm64)"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ijkplayer-openssl-libs
-          path: output
+          path: output/
