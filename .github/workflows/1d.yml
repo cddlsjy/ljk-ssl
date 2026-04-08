@@ -85,4 +85,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ijkplayer-openssl-libs
-          path: output/好不容易编译成功却找不到so是为什么原因？
+          path: output
