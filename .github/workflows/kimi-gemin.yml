@@ -1,24 +1,3 @@
-好的，我来为你分析并编写一个没有错误的GitHub Actions workflow文件，用于自动编译支持OpenSSL的ijkplayer SO文件，主要修复了 linux/perf_event.h 缺失、ffserver/vda 选项冲突以及NDK版本兼容性等问题。
-
-这个方案基于你提供的第二个（更简洁的）workflow，并采纳了你提问时我给出的关键修复点。
-
-修复的关键点：
-
-NDK版本降级为 r10e: ijkplayer k0.8.8 官方推荐且对 r10e 版本有最好的兼容性。使用 r14b 或更高版本通常会导致编译问题。
-ubuntu-20.04: 使用更稳定且与 r10e 兼容性更好的系统版本。
-正确的 module.sh 配置:
-使用 cp 复制 module-default.sh 而不是软链接，以便安全修改。
-注释掉 ---disable-ffserver 和 ---disable-vda，因为FFmpeg 4.0+ 已移除这些选项。
-在文件末尾追加 --enable-openssl 和 --disable-linux-perf，确保这些关键选项生效。
-awk 工具修复: 删除了NDK r10e 中可能与系统 awk 冲突的版本。
-SO文件收集完整性: 确保 libijkffmpeg.so (包含OpenSSL), libijkplayer.so, libijksdl.so 都被正确收集。
-OpenSSL符号验证: 检查 libijkffmpeg.so 而不是 libijkplayer.so 中是否存在SSL/TLS相关符号。
-显式 bash 调用: init-android.sh 和 init-android-openssl.sh 脚本在某些shell环境下可能存在语法问题，显式使用 bash 更加稳健。
-SDK/NDK缓存: 加入缓存机制以加速后续构建。
-.github/workflows/build-ijkplayer-openssl.yml
-yaml
-复制代码
-收起
 name: Build ijkplayer with OpenSSL (Fast - armv7a + arm64)
 
 on:
@@ -279,39 +258,3 @@ EOF
           name: ijkplayer-openssl-libs-${{ github.run_number }}
           path: /home/runner/output/
           retention-days: 30
-复制
-使用说明：
-保存文件: 在你的GitHub仓库根目录创建 .github/workflows/build-ijkplayer-openssl.yml 文件，并将上述内容粘贴进去。
-触发构建:
-进入GitHub仓库 -> Actions 页面。
-在左侧找到 "Build ijkplayer with OpenSSL (Fast - armv7a + arm64)"。
-点击 "Run workflow from branch"。
-你可以选择 build_config (例如 module-default.sh) 和 architectures (例如 armv7a arm64 或 all 如果想编译所有架构，不过推荐按需选择)。
-点击 "Run workflow"。
-下载产物:
-构建完成后，在 Actions 页面找到对应的运行记录。
-在页面底部 Artifacts 区块，下载 ijkplayer-openssl-libs-XXX.zip。
-解压后，你会在 so-libraries/ 目录中找到按架构分类的 libijkffmpeg.so (包含OpenSSL)、libijkplayer.so 和 libijksdl.so 文件。
-关键代码配置 (你的Android项目中):
-java
-复制代码
-收起
-import tv.danmaku.ijk.media.player.IjkMediaPlayer;
-
-// ...
-
-IjkMediaPlayer player = new IjkMediaPlayer();
-
-// 关键：清除DNS缓存，解决HTTP/HTTPS同域名冲突（可选，但推荐）
-player.setOption(IjkMediaPlayer.OPT_CATEGORY_FORMAT, "dns_cache_clear", 1);
-
-// 关键：设置协议白名单，允许HTTPS
-player.setOption(IjkMediaPlayer.OPT_CATEGORY_FORMAT, "protocol_whitelist", 
-    "async,cache,crypto,file,http,https,ijkhttphook,ijkinject,ijklivehook,ijklongurl,ijksegment,ijktcphook,pipe,rtp,tcp,tls,udp,ijkurlhook,data");
-
-// 播放HTTPS流
-player.setDataSource("https://your-radio-stream.com/stream.m3u8");
-player.prepareAsync();
-复制
-
-通过以上修改，你的GitHub Actions workflow 应该能够成功编译支持OpenSSL的ijkplayer SO文件，并解决之前遇到的 linux/perf_event.h 错误。
