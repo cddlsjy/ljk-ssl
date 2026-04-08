@@ -1,0 +1,37 @@
+      - name: Compile IJKPlayer
+        run: |
+          cd ijkplayer/android
+          ./compile-ijk.sh all
+
+      # === 新增步骤：确认产物位置 ===
+      - name: Locate built .so files
+        run: |
+          echo "=== Searching for libijkplayer.so files ==="
+          find ijkplayer -name "libijkplayer.so" -type f 2>/dev/null | tee so_list.txt
+          if [ ! -s so_list.txt ]; then
+            echo "❌ No .so files found! Something went wrong in compilation."
+            exit 1
+          fi
+          echo "✅ Found .so files at above paths."
+
+      # === 原有收集步骤（改为自适应拷贝）===
+      - name: Collect .so files
+        run: |
+          mkdir -p output/armeabi-v7a output/arm64-v8a
+          # 使用 find 自动拷贝，并按照 ABI 目录整理
+          find ijkplayer -path "*/armeabi-v7a/libijkplayer.so" -exec cp {} output/armeabi-v7a/ \;
+          find ijkplayer -path "*/arm64-v8a/libijkplayer.so" -exec cp {} output/arm64-v8a/ \;
+          # 如果上面没找到，尝试直接按文件名拷贝并手动归类（兜底逻辑）
+          if [ -z "$(ls output/armeabi-v7a/)" ]; then
+            echo "Fallback: trying to copy by arch detection..."
+            for so in $(find ijkplayer -name "libijkplayer.so"); do
+              if file "$so" | grep -q "ARM aarch64"; then
+                cp "$so" output/arm64-v8a/
+              elif file "$so" | grep -q "ARM"; then
+                cp "$so" output/armeabi-v7a/
+              fi
+            done
+          fi
+          echo "=== Collected .so files ==="
+          ls -l output/*/
+          nm -D output/armeabi-v7a/libijkplayer.so 2>/dev/null | grep SSL || echo "No SSL symbols (check arm64)"
