@@ -1,4 +1,4 @@
-name: Build ijkplayer with OpenSSL (armv7a + arm64)
+name: kimi-deepseek-Build ijkplayer with OpenSSL (armv7a + arm64)
 
 on:
   workflow_dispatch:
