@@ -1,1 +1,66 @@
 
+name: Build ijkplayer with OpenSSL (armv7a + arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_config:
+        description: 'Build configuration'
+        required: true
+        default: 'module-default.sh'
+        type: choice
+        options:
+          - module-lite.sh
+          - module-default.sh
+          - module-lite-hevc.sh
+
+jobs:
+  build:
+    # 修复：直接使用 ubuntu-22.04 runner，不再使用 container
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    
+    env:
+      # 修复：使用 NDK r14b，并确保路径正确
+      ANDROID_NDK_ROOT: ${{ runner.temp }}/android-ndk-r14b
+      NDK_ROOT: ${{ runner.temp }}/android-ndk-r14b
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git yasm curl wget gcc g++ pkg-config autoconf automake \
+            libtool cmake unzip build-essential python2.7 \
+            openjdk-8-jdk libncurses5 libstdc++6 file bc sudo \
+            --no-install-recommends
+          # 关键修复：安装内核头文件，以防某些情况下 perf_event.h 仍然需要
+          sudo apt-get install -y linux-headers-$(uname -r)
+          
+          ln -sf /usr/bin/python2.7 /usr/bin/python
+          python --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download and Setup NDK r14b
+        run: |
+          mkdir -p ${{ runner.temp }}
+          cd ${{ runner.temp }}
+          wget -q https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip
+          unzip -q android-ndk-r14b-linux-x86_64.zip
+          rm android-ndk-r14b-linux-x86_64.zip
+          # NDK 环境变量已在 env 部分定义
+          
+      - name: Setup Android SDK (可选，如果IJKPlayer构建严格依赖，可以保留)
+        run: |
+          # 此步骤可以根据IJKPlayer对SDK的实际需求决定是否保留
+          # ijkplayer k0.8.8版本通常不严格依赖最新SDK tools
+          mkdir -p /opt/android-sdk
+          cd /opt/android-sdk
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip
+          unzip -q commandlinetools-linux-7583922_latest.zip
+          mkdir -p cmdline-tools/latest
+          mv cmdline-tools/* cmdline-tools/latest/ 2>/dev/null || true
+          yes | cmdline-tools/latest/bin/sdkmanager --licenses || true
+          cmdline-tools/latest/bin/sdkmanager 
