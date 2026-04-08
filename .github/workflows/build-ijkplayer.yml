@@ -1,7 +1,7 @@
 name: Build IJKPlayer with OpenSSL (armv7 + arm64)
 
 on:
-  workflow_dispatch:   # 手动触发，方便控制
+  workflow_dispatch:   # 手动触发
 
 jobs:
   build:
@@ -17,6 +17,17 @@ jobs:
           unzip -q android-ndk-r14b-linux-x86_64.zip
           echo "ANDROID_NDK=$HOME/android-ndk-r14b" >> $GITHUB_ENV
           echo "$HOME/android-ndk-r14b" >> $GITHUB_PATH
+
+      # 关键修复：覆盖 NDK_ROOT 并移除系统 NDK 干扰
+      - name: Override system NDK
+        run: |
+          # 设置所有 NDK 相关变量指向 r14b
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          echo "NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          # 删除 GitHub 预装的高版本 NDK（避免编译脚本误用）
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/27.3.13750724
+          # 确保 ndk-build 来自 r14b
+          which ndk-build
 
       - name: Clone IJKPlayer
         run: |
@@ -59,6 +70,7 @@ jobs:
           mkdir -p output/armeabi-v7a output/arm64-v8a
           cp ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/
           cp ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so output/arm64-v8a/
+          # 验证 SSL 符号
           nm -D output/armeabi-v7a/libijkplayer.so | grep SSL || true
 
       - name: Upload artifacts
