@@ -1,0 +1,148 @@
+name: Build ijkplayer with OpenSSL (armv7a + arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_config:
+        description: 'Build configuration'
+        required: true
+        default: 'module-default.sh'
+        type: choice
+        options:
+          - module-lite.sh
+          - module-default.sh
+          - module-lite-hevc.sh
+
+jobs:
+  build:
+    # 关键修复：使用 ubuntu-22.04（20.04已被弃用）
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    
+    # 在ubuntu-20.04容器内运行，保持NDK r10e兼容性
+    container:
+      image: ubuntu:20.04
+      env:
+        DEBIAN_FRONTEND: noninteractive
+    
+    env:
+      ANDROID_NDK: /opt/android-ndk-r10e
+      ANDROID_NDK_HOME: /opt/android-ndk-r10e
+      ANDROID_SDK: /opt/android-sdk
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            git yasm curl wget gcc g++ pkg-config autoconf automake \
+            libtool cmake unzip build-essential python2.7 \
+            openjdk-8-jdk libncurses5 libstdc++6 file bc sudo \
+            --no-install-recommends
+          
+          ln -sf /usr/bin/python2.7 /usr/bin/python
+          python --version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android SDK
+        run: |
+          mkdir -p $ANDROID_SDK
+          cd $ANDROID_SDK
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip
+          unzip -q commandlinetools-linux-7583922_latest.zip
+          mkdir -p cmdline-tools/latest
+          mv cmdline-tools/* cmdline-tools/latest/ 2>/dev/null || true
+          yes | cmdline-tools/latest/bin/sdkmanager --licenses || true
+          cmdline-tools/latest/bin/sdkmanager "platforms;android-21" "build-tools;25.0.3" "platform-tools"
+
+      - name: Download NDK r10e
+        run: |
+          mkdir -p /opt
+          cd /opt
+          # 国内镜像加速
+          wget -q https://dl.google.com/android/repository/android-ndk-r10e-linux-x86_64.zip || \
+          wget -q https://mirrors.tuna.tsinghua.edu.cn/android/repository/android-ndk-r10e-linux-x86_64.zip
+          
+          unzip -q android-ndk-r10e-linux-x86_64.zip
+          rm android-ndk-r10e-linux-x86_64.zip
+          
+          # 修复awk冲突
+          rm -f $ANDROID_NDK_HOME/prebuilt/linux-x86_64/bin/awk 2>/dev/null || true
+
+      - name: Clone ijkplayer source
+        run: |
+          git clone https://github.com/Bilibili/ijkplayer.git ijkplayer-android
+          cd ijkplayer-android
+          git checkout k0.8.8
+
+      - name: Configure build options (Critical Fix)
+        run: |
+          cd ijkplayer-android/config
+          rm -f module.sh
+          cp ${{ github.event.inputs.build_config }} module.sh
+          
+          # 必须注释掉这两行（FFmpeg 4.0+已删除）
+          sed -i 's/^export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-ffserver"/# &/' module.sh
+          sed -i 's/^export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-vda"/# &/' module.sh
+          
+          # 追加关键配置
+          cat >> module.sh << 'EOF'
+          
+          # Fix: Disable linux-perf to avoid missing perf_event.h
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-linux-perf"
+          
+          # Enable OpenSSL for HTTPS support
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl"
+          EOF
+          
+          echo "=== Final module.sh ==="
+          tail -15 module.sh
+
+      - name: Initialize OpenSSL and FFmpeg
+        run: |
+          cd ijkplayer-android
+          bash ./init-android.sh
+          bash ./init-android-openssl.sh
+
+      - name: Compile OpenSSL
+        run: |
+          cd ijkplayer-android/android/contrib
+          ./compile-openssl.sh clean
+          ./compile-openssl.sh all
+
+      - name: Compile FFmpeg
+        run: |
+          cd ijkplayer-android/android/contrib
+          ./compile-ffmpeg.sh clean
+          ./compile-ffmpeg.sh all
+
+      - name: Compile ijkplayer
+        run: |
+          cd ijkplayer-android/android
+          ./compile-ijk.sh all
+
+      - name: Collect SO files
+        run: |
+          mkdir -p /home/runner/output
+          
+          # 复制所有架构的SO文件
+          for dir in ijkplayer-android/android/ijkplayer/ijkplayer-*/src/main/libs/*/; do
+            if [ -d "$dir" ]; then
+              arch=$(basename "$dir")
+              mkdir -p "/home/runner/output/$arch"
+              cp "$dir"/*.so "/home/runner/output/$arch/" 2>/dev/null || true
+              
+              # 验证文件大小（>3MB说明包含OpenSSL）
+              echo "=== $arch ==="
+              ls -lh "/home/runner/output/$arch/"
+            fi
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ijkplayer-openssl-libs
+          path: /home/runner/output/
+          retention-days: 30
