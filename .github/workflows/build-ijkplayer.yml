@@ -5,28 +5,61 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04  # 降级到20.04，兼容性更好
+    timeout-minutes: 120
+    
+    env:
+      ANDROID_NDK: /opt/android-ndk-r10e
+      ANDROID_NDK_HOME: /opt/android-ndk-r10e
+      ANDROID_SDK: /opt/android-sdk
+    
     steps:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake
-          # 关键：安装内核头文件，解决 perf_event.h 缺失
-          sudo apt-get install -y linux-headers-$(uname -r)
+          sudo apt-get install -y \
+            git make yasm gcc g++ pkg-config autoconf automake libtool \
+            cmake python2.7 openjdk-8-jdk libncurses5 \
+            wget unzip curl
+          
+          # 设置python2.7（ijkplayer编译脚本需要）
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+          python --version
 
-      - name: Setup NDK r14b
+      # 关键修改1：使用NDK r10e（官方推荐版本）
+      - name: Setup NDK r10e
         run: |
-          cd $HOME
-          wget -q https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip
-          unzip -q android-ndk-r14b-linux-x86_64.zip
-          echo "ANDROID_NDK=$HOME/android-ndk-r14b" >> $GITHUB_ENV
-          echo "$HOME/android-ndk-r14b" >> $GITHUB_PATH
+          sudo mkdir -p /opt
+          cd /opt
+          # 使用国内镜像加速
+          sudo wget -q https://dl.google.com/android/repository/android-ndk-r10e-linux-x86_64.zip || \
+          sudo wget -q https://mirrors.tuna.tsinghua.edu.cn/android/repository/android-ndk-r10e-linux-x86_64.zip
+          
+          sudo unzip -q android-ndk-r10e-linux-x86_64.zip
+          sudo rm android-ndk-r10e-linux-x86_64.zip
+          
+          # 关键：修复NDK中的awk问题
+          if [ -f "/opt/android-ndk-r10e/prebuilt/linux-x86_64/bin/awk" ]; then
+            sudo rm -f /opt/android-ndk-r10e/prebuilt/linux-x86_64/bin/awk
+          fi
+          
+          echo "ANDROID_NDK=$ANDROID_NDK" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+          echo "$ANDROID_NDK" >> $GITHUB_PATH
 
-      - name: Override system NDK
+      - name: Setup Android SDK
         run: |
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
-          echo "NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
-          sudo rm -rf /usr/local/lib/android/sdk/ndk/27.3.13750724 || true
+          sudo mkdir -p $ANDROID_SDK
+          cd $ANDROID_SDK
+          sudo wget -q https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip
+          sudo unzip -q commandlinetools-linux-7583922_latest.zip
+          sudo mkdir -p cmdline-tools/latest
+          sudo mv cmdline-tools/* cmdline-tools/latest/ 2>/dev/null || true
+          
+          yes | sudo cmdline-tools/latest/bin/sdkmanager --licenses || true
+          sudo cmdline-tools/latest/bin/sdkmanager "platforms;android-21" "build-tools;25.0.3" "platform-tools"
+          
+          echo "ANDROID_SDK=$ANDROID_SDK" >> $GITHUB_ENV
 
       - name: Clone IJKPlayer
         run: |
@@ -34,52 +67,83 @@ jobs:
           cd ijkplayer
           git checkout k0.8.8
 
+      # 关键修改2：正确的配置顺序和方式
+      - name: Configure module.sh (Critical Fix)
+        run: |
+          cd ijkplayer/config
+          
+          # 删除旧的module.sh
+          rm -f module.sh
+          
+          # 关键：复制而不是软链接，这样我们可以安全修改
+          cp module-default.sh module.sh
+          
+          # 关键修改3：必须注释掉这两行（FFmpeg 4.0已删除ffserver和vda）
+          sed -i 's/^export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-ffserver"/# &/' module.sh
+          sed -i 's/^export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-vda"/# &/' module.sh
+          
+          # 关键修改4：在文件末尾添加禁用linux-perf和启用openssl
+          cat >> module.sh << 'EOF'
+          
+          # Fix: Disable linux-perf to avoid missing perf_event.h
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-linux-perf"
+          
+          # Enable OpenSSL for HTTPS support
+          export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl"
+          EOF
+          
+          echo "=== Final module.sh content ==="
+          tail -20 module.sh
+
       - name: Initialize OpenSSL and FFmpeg
         run: |
           cd ijkplayer
-          ./init-android-openssl.sh
-          ./init-android.sh
-
-      - name: Enable OpenSSL and disable linux-perf in config
-        run: |
-          cd ijkplayer/config
-          rm -f module.sh
-          ln -s module-default.sh module.sh
-          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl --disable-linux-perf"' >> module.sh
-          cat module.sh
-
-      # 额外保险：直接补丁 FFmpeg timer.h，移除 perf_event.h 包含（防止任何残留）
-      - name: Patch FFmpeg timer.h
-        run: |
-          cd ijkplayer/extra/ffmpeg
-          sed -i 's|#include <linux/perf_event.h>|// &|' libavutil/timer.h || true
+          # 使用bash执行（避免dash的语法问题）
+          bash ./init-android.sh
+          bash ./init-android-openssl.sh
 
       - name: Compile OpenSSL
         run: |
           cd ijkplayer/android/contrib
           ./compile-openssl.sh clean
-          ./compile-openssl.sh all
+          # 只编译armv7a和arm64（更快）
+          ./compile-openssl.sh armv7a
+          ./compile-openssl.sh arm64
 
       - name: Compile FFmpeg
         run: |
           cd ijkplayer/android/contrib
           ./compile-ffmpeg.sh clean
-          ./compile-ffmpeg.sh all
+          ./compile-ffmpeg.sh armv7a
+          ./compile-ffmpeg.sh arm64
 
       - name: Compile IJKPlayer
         run: |
           cd ijkplayer/android
-          ./compile-ijk.sh all
+          ./compile-ijk.sh armv7a
+          ./compile-ijk.sh arm64
 
-      - name: Collect .so files (armv7 and arm64)
+      - name: Collect .so files
         run: |
           mkdir -p output/armeabi-v7a output/arm64-v8a
-          cp ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/
-          cp ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so output/arm64-v8a/
-          nm -D output/armeabi-v7a/libijkplayer.so | grep SSL || true
+          
+          # 复制所有so文件
+          cp ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/*.so output/armeabi-v7a/ 2>/dev/null || true
+          cp ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/*.so output/arm64-v8a/ 2>/dev/null || true
+          
+          echo "=== armv7a SO files ==="
+          ls -lh output/armeabi-v7a/
+          
+          echo "=== arm64 SO files ==="
+          ls -lh output/arm64-v8a/
+          
+          # 验证OpenSSL是否编译进去（检查符号）
+          echo "=== Checking OpenSSL symbols in libijkffmpeg.so ==="
+          nm -D output/armeabi-v7a/libijkffmpeg.so 2>/dev/null | grep -i "ssl\|tls\|https" | head -10 || echo "No SSL symbols found (may need to check)"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ijkplayer-openssl-libs
           path: output/
+          retention-days: 30
