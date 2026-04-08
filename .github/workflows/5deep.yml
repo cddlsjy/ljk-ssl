@@ -1,0 +1,85 @@
+name: Build IJKPlayer with OpenSSL (armv7 + arm64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake
+          # 关键：安装内核头文件，提供 linux/perf_event.h
+          sudo apt-get install -y linux-headers-$(uname -r)
+
+      - name: Setup NDK r14b
+        run: |
+          cd $HOME
+          wget -q https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip
+          unzip -q android-ndk-r14b-linux-x86_64.zip
+          echo "ANDROID_NDK=$HOME/android-ndk-r14b" >> $GITHUB_ENV
+          echo "$HOME/android-ndk-r14b" >> $GITHUB_PATH
+
+      - name: Override system NDK
+        run: |
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          echo "NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/27.3.13750724 || true
+
+      - name: Clone IJKPlayer
+        run: |
+          git clone https://github.com/Bilibili/ijkplayer.git ijkplayer
+          cd ijkplayer
+          git checkout k0.8.8
+
+      - name: Initialize OpenSSL and FFmpeg
+        run: |
+          cd ijkplayer
+          ./init-android-openssl.sh
+          ./init-android.sh
+
+      - name: Enable OpenSSL and disable linux-perf in config
+        run: |
+          cd ijkplayer/config
+          rm -f module.sh
+          ln -s module-default.sh module.sh
+          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl --disable-linux-perf"' >> module.sh
+
+      - name: Compile OpenSSL
+        run: |
+          cd ijkplayer/android/contrib
+          ./compile-openssl.sh clean
+          ./compile-openssl.sh all
+
+      - name: Compile FFmpeg
+        run: |
+          cd ijkplayer/android/contrib
+          ./compile-ffmpeg.sh clean
+          ./compile-ffmpeg.sh all
+
+      - name: Compile IJKPlayer
+        run: |
+          cd ijkplayer/android
+          ./compile-ijk.sh all
+
+      - name: Collect .so files
+        run: |
+          mkdir -p output/armeabi-v7a output/arm64-v8a
+          find ijkplayer -name "libijkplayer.so" -type f | while read so; do
+            case "$so" in
+              *armeabi-v7a*) cp "$so" output/armeabi-v7a/ ;;
+              *arm64-v8a*) cp "$so" output/arm64-v8a/ ;;
+            esac
+          done
+          ls -la output/armeabi-v7a/ output/arm64-v8a/
+          if [ -f output/armeabi-v7a/libijkplayer.so ]; then
+            nm -D output/armeabi-v7a/libijkplayer.so | grep SSL || true
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ijkplayer-openssl-libs
+          path: output/
