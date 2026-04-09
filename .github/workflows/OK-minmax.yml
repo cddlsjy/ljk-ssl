@@ -1,0 +1,138 @@
+name: Build IJKPlayer with OpenSSL (armv7 + arm64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake
+          # 安装 ncurses5 解决 BFD 警告
+          sudo apt-get install -y libncurses5
+
+      - name: Setup NDK r14b
+        run: |
+          cd $HOME
+          wget -q https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip
+          unzip -q android-ndk-r14b-linux-x86_64.zip
+          echo "ANDROID_NDK=$HOME/android-ndk-r14b" >> $GITHUB_ENV
+          echo "$HOME/android-ndk-r14b" >> $GITHUB_PATH
+
+      - name: Override system NDK
+        run: |
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          echo "NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/27.3.13750724 || true
+
+      - name: Clone IJKPlayer
+        run: |
+          git clone https://github.com/Bilibili/ijkplayer.git ijkplayer
+          cd ijkplayer
+          git checkout k0.8.8
+
+      # 关键修改：先配置 module.sh，再执行 init 脚本
+      - name: Configure module.sh (before init)
+        run: |
+          cd ijkplayer/config
+          rm -f module.sh
+          # 使用 cp 而不是 ln -s，这样修改不会污染原文件
+          cp module-default.sh module.sh
+          
+          # 删除 ffmpeg 4.0 不支持的选项
+          sed -i '/--disable-ffserver/d' module.sh
+          sed -i '/--disable-vda/d' module.sh
+          
+          # 添加关键配置：禁用 linux-perf 和启用 openssl
+          echo '' >> module.sh
+          echo '# Custom flags' >> module.sh
+          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-linux-perf"' >> module.sh
+          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl"' >> module.sh
+          
+          cat module.sh
+
+      - name: Initialize OpenSSL and FFmpeg
+        run: |
+          cd ijkplayer
+          # 使用 bash 而不是 sh，避免语法错误
+          bash ./init-android-openssl.sh
+          bash ./init-android.sh
+
+      - name: Compile OpenSSL
+        run: |
+          cd ijkplayer/android/contrib
+          ./compile-openssl.sh clean
+          ./compile-openssl.sh all
+
+      - name: Compile FFmpeg
+        run: |
+          cd ijkplayer/android/contrib
+          ./compile-ffmpeg.sh clean
+          ./compile-ffmpeg.sh all
+
+      - name: Compile IJKPlayer
+        run: |
+          cd ijkplayer/android
+          ./compile-ijk.sh all
+
+      - name: Collect .so files with debugging
+        run: |
+          mkdir -p output/armeabi-v7a output/arm64-v8a
+          
+          echo "=== Debugging: Finding all .so files ==="
+          find ijkplayer -name "*.so" -type f 2>/dev/null || echo "No .so files found"
+          
+          echo ""
+          echo "=== Checking expected paths ==="
+          
+          # 尝试多个可能的路径
+          ARMV7_PATHS=(
+            "ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so"
+            "ijkplayer/ijkplayer-armv7a/library/src/main/libs/armeabi-v7a/libijkplayer.so"
+            "ijkplayer/android/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so"
+          )
+          
+          ARM64_PATHS=(
+            "ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so"
+            "ijkplayer/ijkplayer-arm64/library/src/main/libs/arm64-v8a/libijkplayer.so"
+            "ijkplayer/android/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so"
+          )
+          
+          # 复制 armv7a
+          for path in "${ARMV7_PATHS[@]}"; do
+            if [ -f "$path" ]; then
+              echo "Found armv7a: $path"
+              cp "$path" output/armeabi-v7a/
+              break
+            fi
+          done
+          
+          # 复制 arm64
+          for path in "${ARM64_PATHS[@]}"; do
+            if [ -f "$path" ]; then
+              echo "Found arm64: $path"
+              cp "$path" output/arm64-v8a/
+              break
+            fi
+          done
+          
+          echo ""
+          echo "=== Output directory contents ==="
+          ls -la output/armeabi-v7a/ 2>/dev/null || echo "armeabi-v7a empty"
+          ls -la output/arm64-v8a/ 2>/dev/null || echo "arm64-v8a empty"
+          
+          # 检查 SSL 符号
+          if [ -f output/armeabi-v7a/libijkplayer.so ]; then
+            echo ""
+            echo "=== Checking OpenSSL symbols (armv7a) ==="
+            nm -D output/armeabi-v7a/libijkplayer.so 2>/dev/null | grep -i ssl | head -10 || echo "No SSL symbols found"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ijkplayer-openssl-libs
+          path: output/
