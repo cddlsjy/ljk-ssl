@@ -1,0 +1,180 @@
+name: Build IJKPlayer with OpenSSL (armv7 + arm64)
+
+on:
+  # 允许手动从 GitHub Actions UI 触发工作流
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04 # 使用 Ubuntu 22.04 作为 Runner 环境
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4 # 检出您的仓库代码
+
+      - name: Install dependencies
+        run: |
+          echo "Installing system dependencies..."
+          sudo apt-get update
+          sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake unzip
+          # 安装 ncurses5 解决 BFD 警告，对于旧 NDK 比较常见
+          sudo apt-get install -y libncurses5
+          echo "Dependencies installed."
+
+      - name: Setup NDK r14b
+        run: |
+          echo "Setting up Android NDK r14b..."
+          cd $HOME
+          # 使用 -P 选项下载到指定目录，-q 启用静默模式
+          wget -q -P $HOME https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip
+          unzip -q $HOME/android-ndk-r14b-linux-x86_64.zip -d $HOME
+          
+          # 设置环境变量，确保 NDK 可被 IJKPlayer 脚本找到
+          echo "ANDROID_NDK=$HOME/android-ndk-r14b" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r14b" >> $GITHUB_ENV
+          echo "NDK_ROOT=$HOME/android-ndk-r14b" >> $GITHUB_ENV
+          
+          # 将 NDK 路径添加到 PATH，方便后续脚本直接调用工具链
+          echo "$HOME/android-ndk-r14b" >> $GITHUB_PATH
+          
+          echo "NDK r14b setup complete. ANDROID_NDK set to: $ANDROID_NDK"
+
+      - name: Override system NDK (critical for older NDKs)
+        run: |
+          echo "Attempting to remove any newer system NDK versions to ensure r14b is used..."
+          # 彻底移除 /usr/local/lib/android/sdk/ndk/ 下的所有 NDK 版本
+          # 避免系统路径中存在冲突的 NDK
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/* || true
+          echo "System NDK cleanup attempted."
+          # 验证 PATH 中 NDK 路径的顺序
+          echo "Current PATH: $PATH"
+
+      - name: Clone IJKPlayer
+        run: |
+          echo "Cloning IJKPlayer repository..."
+          git clone https://github.com/Bilibili/ijkplayer.git ijkplayer
+          cd ijkplayer
+          git checkout k0.8.8
+          echo "IJKPlayer cloned and checked out k0.8.8."
+
+      - name: Configure module.sh for OpenSSL and FFmpeg options
+        run: |
+          echo "Configuring module.sh..."
+          cd ijkplayer/config
+          rm -f module.sh
+          # 使用 cp 而不是 ln -s，这样修改不会污染原文件，且在容器中更稳定
+          cp module-default.sh module.sh
+          
+          # 删除 ffmpeg 4.0 不支持的选项，避免编译错误
+          sed -i '/--disable-ffserver/d' module.sh
+          sed -i '/--disable-vda/d' module.sh
+          
+          # 添加关键配置：禁用 linux-perf (非 Android 必需) 和启用 openssl
+          echo '' >> module.sh
+          echo '# Custom flags added by workflow' >> module.sh
+          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-linux-perf"' >> module.sh
+          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl"' >> module.sh
+          
+          echo "--- module.sh content ---"
+          cat module.sh
+          echo "--- end module.sh content ---"
+          echo "module.sh configured."
+
+      - name: Initialize OpenSSL and FFmpeg build scripts
+        run: |
+          echo "Initializing OpenSSL and FFmpeg build scripts..."
+          cd ijkplayer
+          # 使用 bash 而不是 sh，避免某些脚本特定的语法错误
+          bash ./init-android-openssl.sh
+          bash ./init-android.sh
+          echo "Scripts initialized."
+
+      - name: Compile OpenSSL for Android
+        run: |
+          echo "Compiling OpenSSL..."
+          # 进入 contrib 目录进行编译
+          cd ijkplayer/android/contrib
+          ./compile-openssl.sh clean
+          ./compile-openssl.sh all
+          echo "OpenSSL compiled."
+
+      - name: Compile FFmpeg for Android
+        run: |
+          echo "Compiling FFmpeg..."
+          # 仍然在 contrib 目录
+          cd ijkplayer/android/contrib
+          ./compile-ffmpeg.sh clean
+          ./compile-ffmpeg.sh all
+          echo "FFmpeg compiled."
+
+      - name: Compile IJKPlayer modules
+        run: |
+          echo "Compiling IJKPlayer Android modules..."
+          # 进入 android 目录进行主模块编译
+          cd ijkplayer/android
+          ./compile-ijk.sh all
+          echo "IJKPlayer Android modules compiled."
+          
+          # 打印编译后 lib 目录的内容，以便调试
+          echo "Listing compiled libs for armeabi-v7a:"
+          ls -alR ijkplayer-armv7a/src/main/libs/armeabi-v7a/ || true
+          echo "Listing compiled libs for arm64-v8a:"
+          ls -alR ijkplayer-arm64/src/main/libs/arm64-v8a/ || true
+          # 确保此时的工作目录是 ijkplayer/android
+
+      - name: Collect .so files and check SSL symbols
+        run: |
+          echo "Collecting .so files and checking for SSL symbols..."
+          # IMPORTANT: 确保当前目录是 ijkplayer/android，否则下面的路径会出错
+          # 如果因为某种原因上一步 cd 失败，这里可以再次确认
+          if [ "$(basename $(pwd))" != "android" ]; then
+            echo "Warning: Current directory is not 'ijkplayer/android'. Attempting to change directory..."
+            cd ijkplayer/android || { echo "Error: Could not change to ijkplayer/android."; exit 1; }
+          fi
+          
+          echo "Current working directory for collection: $(pwd)"
+          
+          # 在仓库根目录创建 output 文件夹，而不是在 ijkplayer/android 内部
+          mkdir -p ../../output/armeabi-v7a ../../output/arm64-v8a
+          
+          # 复制 SO 文件。源路径现在是相对于 ijkplayer/android 目录的。
+          # 目标路径是相对于 ijkplayer/android 目录向上两级到仓库根目录的 output 文件夹。
+          echo "Attempting to copy libijkplayer.so for armeabi-v7a..."
+          cp ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so ../../output/armeabi-v7a/ || echo "Warning: libijkplayer.so for armeabi-v7a NOT found or copy failed."
+          
+          echo "Attempting to copy libijkplayer.so for arm64-v8a..."
+          cp ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so ../../output/arm64-v8a/ || echo "Warning: libijkplayer.so for arm64-v8a NOT found or copy failed."
+          
+          echo "Listing contents of the final output directory (relative to repo root):"
+          ls -alR ../../output/ || true
+
+          # 检查是否包含SSL符号 (检查已复制到 output 目录中的文件)
+          if [ -f ../../output/armeabi-v7a/libijkplayer.so ]; then
+            echo "Checking SSL symbols in ../../output/armeabi-v7a/libijkplayer.so:"
+            nm -D ../../output/armeabi-v7a/libijkplayer.so | grep -i ssl | head -5 || true
+          else
+            echo "Info: armeabi-v7a/libijkplayer.so not found in output directory, skipping SSL symbol check."
+          fi
+          
+          if [ -f ../../output/arm64-v8a/libijkplayer.so ]; then
+            echo "Checking SSL symbols in ../../output/arm64-v8a/libijkplayer.so:"
+            nm -D ../../output/arm64-v8a/libijkplayer.so | grep -i ssl | head -5 || true
+          else
+            echo "Info: arm64-v8a/libijkplayer.so not found in output directory, skipping SSL symbol check."
+          fi
+          
+          # 关键一步：将当前工作目录切换回仓库根目录，以便 upload-artifact 能够正确找到 output 文件夹
+          echo "Changing directory back to repository root for artifact upload..."
+          cd ../../
+          echo "Current directory after collection and cd back to root: $(pwd)"
+
+      - name: Upload compiled artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ijkplayer-openssl-libs # Artifact 的名称
+          path: output/ # 此时 output 目录在仓库根目录，路径正确
+          if-no-files-found: warn # 如果没有找到文件，则发出警告而不是使工作流失败
+        env:
+          ANDROID_NDK: ${{ env.ANDROID_NDK }} # 传递 NDK 路径给 artifact 步骤，虽然这里用不到，但保持一致性
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+          NDK_ROOT: ${{ env.NDK_ROOT }}
