@@ -1,0 +1,102 @@
+name: Build IJKPlayer with OpenSSL (armv7 + arm64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make yasm gcc g++ pkg-config autoconf automake libtool cmake
+          sudo apt-get install -y libncurses5
+      - name: Setup NDK r14b
+        run: |
+          cd $HOME
+          wget -q https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip
+          unzip -q android-ndk-r14b-linux-x86_64.zip
+          echo "ANDROID_NDK=$HOME/android-ndk-r14b" >> $GITHUB_ENV
+          echo "$HOME/android-ndk-r14b" >> $GITHUB_PATH
+      - name: Override system NDK
+        run: |
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          echo "NDK_ROOT=$ANDROID_NDK" >> $GITHUB_ENV
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/27.3.13750724 || true
+      - name: Clone IJKPlayer
+        run: |
+          git clone https://github.com/Bilibili/ijkplayer.git ijkplayer
+          cd ijkplayer
+          git checkout k0.8.8
+      - name: Configure module.sh (before init)
+        run: |
+          cd ijkplayer/config
+          rm -f module.sh
+          cp module-default.sh module.sh
+          sed -i '/--disable-ffserver/d' module.sh
+          sed -i '/--disable-vda/d' module.sh
+          echo '' >> module.sh
+          echo '# Custom flags' >> module.sh
+          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-linux-perf"' >> module.sh
+          echo 'export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-openssl"' >> module.sh
+          cat module.sh
+      - name: Initialize OpenSSL and FFmpeg
+        run: |
+          cd ijkplayer
+          bash ./init-android-openssl.sh
+          bash ./init-android.sh
+      - name: Compile OpenSSL
+        run: |
+          cd ijkplayer/android/contrib
+          ./compile-openssl.sh clean
+          ./compile-openssl.sh all
+      - name: Compile FFmpeg
+        run: |
+          cd ijkplayer/android/contrib
+          ./compile-ffmpeg.sh clean
+          ./compile-ffmpeg.sh all
+      - name: Compile IJKPlayer
+        run: |
+          cd ijkplayer/android
+          ./compile-ijk.sh all
+      - name: 【关键调试】查找所有生成的 libijkplayer.so 文件
+        run: |
+          # 全局查找 so 文件，输出路径（关键！确认真实生成位置）
+          find $GITHUB_WORKSPACE/ijkplayer -name "libijkplayer.so" -type f
+          # 同时输出编译目录结构，辅助定位
+          ls -la $GITHUB_WORKSPACE/ijkplayer/android/ijkplayer/ || true
+          ls -la $GITHUB_WORKSPACE/ijkplayer/android/player/ || true
+      - name: Collect .so files (修正路径 + 兜底逻辑)
+        run: |
+          mkdir -p output/armeabi-v7a output/arm64-v8a
+          
+          # 路径1：原路径（兼容旧逻辑）
+          cp $GITHUB_WORKSPACE/ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/ 2>/dev/null || true
+          cp $GITHUB_WORKSPACE/ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so output/arm64-v8a/ 2>/dev/null || true
+          
+          # 路径2：IJKPlayer 标准编译输出路径（重点修正！）
+          cp $GITHUB_WORKSPACE/ijkplayer/android/ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/ 2>/dev/null || true
+          cp $GITHUB_WORKSPACE/ijkplayer/android/ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so output/arm64-v8a/ 2>/dev/null || true
+          
+          # 路径3：兜底路径（兼容其他编译输出位置）
+          cp $GITHUB_WORKSPACE/ijkplayer/android/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/ 2>/dev/null || true
+          cp $GITHUB_WORKSPACE/ijkplayer/android/libs/arm64-v8a/libijkplayer.so output/arm64-v8a/ 2>/dev/null || true
+          
+          # 验证复制结果
+          echo "===== 复制后 output 目录内容 ====="
+          ls -la output/armeabi-v7a/ || true
+          ls -la output/arm64-v8a/ || true
+          
+          # 检查 SSL 符号（确认编译生效）
+          if [ -f output/armeabi-v7a/libijkplayer.so ]; then
+            nm -D output/armeabi-v7a/libijkplayer.so | grep -i ssl | head -5 || true
+          fi
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ijkplayer-openssl-libs
+          path: |
+            output/
+            # 兜底：如果 output 为空，上传查找日志辅助调试
+            $GITHUB_WORKSPACE/ijkplayer/android/libs/ || true
