@@ -176,4 +176,52 @@ EOF
           # 如果编译器崩溃，尝试使用单线程
           export MAKEFLAGS="-j1"
           ./compile-ffmpeg.sh all || {
-            echo "First attempt failed, trying with single thread
+            echo "First attempt failed, trying with single thread..."
+            ./compile-ffmpeg.sh clean
+            ./compile-ffmpeg.sh all
+          }
+
+      - name: Compile IJKPlayer
+        run: |
+          cd ijkplayer/android
+          ./compile-ijk.sh all
+
+      - name: Collect .so files
+        run: |
+          mkdir -p output/armeabi-v7a output/arm64-v8a
+          
+          # 查找并复制 so 文件（带错误处理）
+          if [ -f "ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so" ]; then
+            cp ijkplayer/ijkplayer-armv7a/src/main/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/
+          elif [ -f "ijkplayer/ijkplayer-armv7a/library/src/main/libs/armeabi-v7a/libijkplayer.so" ]; then
+            cp ijkplayer/ijkplayer-armv7a/library/src/main/libs/armeabi-v7a/libijkplayer.so output/armeabi-v7a/
+          else
+            echo "Warning: armv7a libijkplayer.so not found"
+            find ijkplayer -name "libijkplayer.so" -path "*armv7a*" 2>/dev/null || true
+          fi
+          
+          if [ -f "ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so" ]; then
+            cp ijkplayer/ijkplayer-arm64/src/main/libs/arm64-v8a/libijkplayer.so output/arm64-v8a/
+          elif [ -f "ijkplayer/ijkplayer-arm64/library/src/main/libs/arm64-v8a/libijkplayer.so" ]; then
+            cp ijkplayer/ijkplayer-arm64/library/src/main/libs/arm64-v8a/libijkplayer.so output/arm64-v8a/
+          else
+            echo "Warning: arm64 libijkplayer.so not found"
+            find ijkplayer -name "libijkplayer.so" -path "*arm64*" 2>/dev/null || true
+          fi
+          
+          # 验证 OpenSSL 符号
+          echo "=== Verifying OpenSSL symbols ==="
+          if [ -f "output/armeabi-v7a/libijkplayer.so" ]; then
+            echo "armeabi-v7a:"
+            nm -D output/armeabi-v7a/libijkplayer.so | grep -i ssl | head -10 || echo "No SSL symbols (may need check)"
+          fi
+          if [ -f "output/arm64-v8a/libijkplayer.so" ]; then
+            echo "arm64-v8a:"
+            nm -D output/arm64-v8a/libijkplayer.so | grep -i ssl | head -10 || echo "No SSL symbols (may need check)"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ijkplayer-openssl-libs-ubuntu2204
+          path: output/
